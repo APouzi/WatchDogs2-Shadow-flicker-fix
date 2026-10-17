@@ -1,0 +1,9 @@
+Generated with the built-in image generation tool on October 17, 2026.
+
+Logo prompt:
+Create one polished, simple logo for a Windows 10 and 11 utility, with a transparent background. Landscape composition, wide horizontal header with generous clear padding, suitable for embedding in a desktop installer. At left place a single simple rounded sky-blue cloud icon, flat clean vector-like forms, no gradients needed. At right place a very legible dark navy clean sans-serif wordmark with EXACT text: "Alexandre's Watch Dogs 2 Shadow Flicker". Arrange the wordmark into two or three balanced lines while retaining the exact phrase and straight apostrophe. All letters must be large, crisp, correctly spelled, and readily readable. Icon and text visually balanced. No additional graphics, trademark logos, weapons, characters, microtext, slogans, border, mockup, shadows, or decorative backdrop. Output a transparent PNG-style bitmap logo, not a photo of a logo.
+
+Icon edit prompt:
+Create a separate app-icon version of this existing logo. Remove all text completely and preserve the same simple rounded sky-blue cloud symbol, its silhouette, proportions, and clean flat appearance. Center ONLY that one cloud on a transparent square canvas. Make the cloud large with generous, even padding on all sides so it works as a Windows executable icon. No letters, wordmark, border, framing, badge, extra symbols, background, shadow, or mockup. Keep the sky-blue cloud clean and crisp and recognizable at small sizes. Do not alter the original logo file; generate this as a separate transparent square PNG-style bitmap.
+
+logo.png and cloud-icon.png preserve the generated PNG assets. app.ico contains resized PNG frames for Windows (16, 24, 32, 48, 64, 128, and 256 pixels).

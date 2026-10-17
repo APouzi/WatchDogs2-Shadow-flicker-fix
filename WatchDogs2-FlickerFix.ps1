@@ -8,6 +8,14 @@ Downloads the pinned official release of the community tool NVIDIA Profile Inspe
 its SHA256, and changes only two settings in the existing Watch Dogs 2 profile.
 Apply and Restore request administrator access. Status does not change profiles.
 Close the game before making changes. No game files or global settings are edited.
+.PARAMETER ProgressFile
+Optional absolute local .json path with an existing parent directory. Receives atomic UTF-8
+reports with Percent, Message, and State (Running, Succeeded, Failed, or Cancelled).
+.PARAMETER CancellationFile
+Optional separate absolute local .json path with an existing parent directory. Create this
+marker to request cancellation before driver writes begin. Its contents are ignored.
+Once writes begin, the operation finishes or rolls back safely. Exit codes are 0 for success,
+1 for failure, and 2 for cancellation. These switches are optional for standalone use.
 .EXAMPLE
 .\WatchDogs2-FlickerFix.ps1
 .EXAMPLE
@@ -22,7 +30,9 @@ param(
     [ValidateSet('Apply', 'Status', 'Restore')][string]$Action = 'Apply',
     [string]$StateDirectory = (Join-Path $env:LOCALAPPDATA 'WatchDogs2FlickerFix'),
     [string]$ToolPath,
-    [string]$GamePath
+    [string]$GamePath,
+    [string]$ProgressFile,
+    [string]$CancellationFile
 )
 
 # Start-Process can inherit PowerShell 7 module paths unchanged. Use the inbox
@@ -40,6 +50,73 @@ $script:Wd2ExeHash = '1EBD8129B3C564BF226291FB3344819FD59668066F0C5E03334A69A04A
 $script:Wd2ReferenceHash = '0EA7B055AEE5C543047243D2DD7ABDD1B8C6D96F5D2B7BB5FE17BE8130E005EF'
 $script:Wd2ZipHash = '88DCF3514111E8DE630688467C03C36D8C2A8AD9EBC8073F27C069F82B75BB40'
 $script:Wd2Messages = New-Object 'System.Collections.Generic.List[string]'
+$script:Wd2ProgressPath = $null
+$script:Wd2ProgressPercent = 0
+$script:Wd2CancellationPath = $null
+
+function Set-Wd2ProgressDestination([string]$Path) {
+    $script:Wd2ProgressPath = $null
+    $script:Wd2ProgressPercent = 0
+    if (-not $Path) { return }
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') {
+        throw 'ProgressFile must be an absolute local JSON file path.'
+    }
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if ([IO.Path]::GetExtension($fullPath) -ine '.json' -or -not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($fullPath))) {
+        throw 'ProgressFile must have a .json extension and an existing parent directory.'
+    }
+    $script:Wd2ProgressPath = $fullPath
+}
+
+function Write-Wd2Progress([ValidateRange(0, 100)][int]$Percent, [string]$Message, [ValidateSet('Running', 'Succeeded', 'Failed', 'Cancelled')][string]$State = 'Running', [switch]$Reset) {
+    if (-not $script:Wd2ProgressPath) { return }
+    # A runtime/elevation helper shares the same file. Keep its last real phase if
+    # the parent reports a helper failure, rather than moving the bar backwards.
+    if (-not $Reset -and [IO.File]::Exists($script:Wd2ProgressPath)) {
+        try {
+            $previous = [IO.File]::ReadAllText($script:Wd2ProgressPath) | ConvertFrom-Json -ErrorAction Stop
+            $previousPercent = 0
+            if ([int]::TryParse([string]$previous.Percent, [ref]$previousPercent) -and $previousPercent -ge 0 -and $previousPercent -le 100) {
+                $Percent = [Math]::Max($Percent, $previousPercent)
+            }
+        } catch { Write-Verbose 'Previous progress could not be read; replacing it with the current phase.' }
+    }
+    if (-not $Reset) { $Percent = [Math]::Max($Percent, $script:Wd2ProgressPercent) }
+    $report = [ordered]@{ Percent = $Percent; Message = $Message; State = $State }
+    $json = $report | ConvertTo-Json -Compress
+    $temporary = $script:Wd2ProgressPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllText($temporary, $json, (New-Object Text.UTF8Encoding($false)))
+        if ([IO.File]::Exists($script:Wd2ProgressPath)) {
+            [IO.File]::Replace($temporary, $script:Wd2ProgressPath, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $script:Wd2ProgressPath)
+        }
+        $script:Wd2ProgressPercent = $Percent
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Set-Wd2CancellationDestination([string]$Path) {
+    $script:Wd2CancellationPath = $null
+    if (-not $Path) { return }
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') {
+        throw 'CancellationFile must be an absolute local JSON file path.'
+    }
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if ([IO.Path]::GetExtension($fullPath) -ine '.json' -or -not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($fullPath))) {
+        throw 'CancellationFile must have a .json extension and an existing parent directory.'
+    }
+    if ($fullPath -ieq $script:Wd2ProgressPath) { throw 'CancellationFile and ProgressFile must be different paths.' }
+    $script:Wd2CancellationPath = $fullPath
+}
+
+function Assert-Wd2NotCancelled {
+    if ($script:Wd2CancellationPath -and [IO.File]::Exists($script:Wd2CancellationPath)) {
+        throw [OperationCanceledException]::new('Cancelled before changing driver settings. No driver settings were changed.')
+    }
+}
 
 function Write-Wd2Message([string]$Message) {
     $script:Wd2Messages.Add($Message)
@@ -47,6 +124,7 @@ function Write-Wd2Message([string]$Message) {
 }
 
 function Find-Wd2Game([string]$SpecifiedPath) {
+    Assert-Wd2NotCancelled
     $candidates = New-Object 'System.Collections.Generic.List[string]'
     if ($SpecifiedPath) { $candidates.Add([IO.Path]::GetFullPath($SpecifiedPath)) }
     else {
@@ -57,6 +135,7 @@ function Find-Wd2Game([string]$SpecifiedPath) {
             if ($entry.InstallPath) { $steamRoots += $entry.InstallPath }
         }
         foreach ($steamRoot in @($steamRoots | Where-Object { $_ } | Select-Object -Unique)) {
+            Assert-Wd2NotCancelled
             $libraries = @($steamRoot)
             foreach ($libraryFile in @((Join-Path $steamRoot 'steamapps\libraryfolders.vdf'), (Join-Path $steamRoot 'config\libraryfolders.vdf'))) {
                 if (Test-Path -LiteralPath $libraryFile) {
@@ -96,6 +175,7 @@ function Find-Wd2Game([string]$SpecifiedPath) {
             }
         }
         foreach ($commonRoot in $commonRoots) {
+            Assert-Wd2NotCancelled
             foreach ($folder in @(Get-ChildItem -LiteralPath $commonRoot -Directory -ErrorAction SilentlyContinue)) {
                 if ($folder.Name -match '(?i)^watch[ _-]*dogs[ _-]*2$') { $candidates.Add($folder.FullName) }
             }
@@ -121,6 +201,8 @@ function Assert-Wd2Hash([string]$Path, [string]$Expected) {
 }
 
 function Get-Wd2Tool([string]$Root, [string]$ExistingTool) {
+    Assert-Wd2NotCancelled
+    Write-Wd2Progress 20 'Preparing the verified NVIDIA profile tool.'
     if ($ExistingTool) { $exe = [IO.Path]::GetFullPath($ExistingTool) }
     else {
         $toolDirectory = Join-Path $Root 'Tools\3.0.2.1'
@@ -131,13 +213,17 @@ function Get-Wd2Tool([string]$Root, [string]$ExistingTool) {
             $oldTls = [Net.ServicePointManager]::SecurityProtocol
             try {
                 [Net.ServicePointManager]::SecurityProtocol = $oldTls -bor [Net.SecurityProtocolType]::Tls12
+                Write-Wd2Progress 20 'Downloading NVIDIA Profile Inspector 3.0.2.1 from its official project.'
                 Write-Wd2Message 'Downloading NVIDIA Profile Inspector 3.0.2.1 from its official project...'
                 Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/Orbmu2k/nvidiaProfileInspector/releases/download/v3.0.2.1/nvidiaProfileInspector.zip' -OutFile $archive
             } finally { [Net.ServicePointManager]::SecurityProtocol = $oldTls }
+            Assert-Wd2NotCancelled
+            Write-Wd2Progress 30 'Verifying the downloaded archive checksum.'
             Assert-Wd2Hash $archive $script:Wd2ZipHash
             Expand-Archive -LiteralPath $archive -DestinationPath $toolDirectory -Force
         }
     }
+    Write-Wd2Progress 35 'Verifying the profile tool and reference checksums.'
     Assert-Wd2Hash $exe $script:Wd2ExeHash
     Assert-Wd2Hash (Join-Path (Split-Path -Parent $exe) 'Reference.xml') $script:Wd2ReferenceHash
     return $exe
@@ -214,8 +300,21 @@ function Save-Wd2State($State, [string]$Path) {
     Move-Item -LiteralPath $tempPath -Destination $Path -Force
 }
 
+function Get-Wd2HelperCommand([string]$ScriptPath, [string]$Root) {
+    # Encode literal PowerShell arguments; paths containing spaces or apostrophes are safe.
+    $command = "& '" + $ScriptPath.Replace("'", "''") + "' -Action '" + $Action + "' -StateDirectory '" + $Root.Replace("'", "''") + "'"
+    if ($ToolPath) { $command += " -ToolPath '" + ([IO.Path]::GetFullPath($ToolPath)).Replace("'", "''") + "'" }
+    if ($GamePath) { $command += " -GamePath '" + ([IO.Path]::GetFullPath($GamePath)).Replace("'", "''") + "'" }
+    if ($script:Wd2ProgressPath) { $command += " -ProgressFile '" + $script:Wd2ProgressPath.Replace("'", "''") + "'" }
+    if ($script:Wd2CancellationPath) { $command += " -CancellationFile '" + $script:Wd2CancellationPath.Replace("'", "''") + "'" }
+    # Preserve cooperative cancellation instead of collapsing every nonzero exit to one.
+    $command += '; if ($?) { exit 0 } elseif ($LASTEXITCODE -eq 2) { exit 2 } else { exit 1 }'
+    return $command
+}
+
 function Invoke-Wd2Fix {
     $ErrorActionPreference = 'Stop'
+    Assert-Wd2NotCancelled
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or [Environment]::OSVersion.Version.Major -lt 10 -or -not [Environment]::Is64BitOperatingSystem) {
         throw 'This script requires 64-bit Windows 10 or Windows 11.'
     }
@@ -224,11 +323,7 @@ function Invoke-Wd2Fix {
     $needsAdmin = $Action -ne 'Status' -and -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $needsWindowsPowerShell = $PSVersionTable.PSEdition -eq 'Core' -or [IntPtr]::Size -ne 8
     if ($needsAdmin -or $needsWindowsPowerShell) {
-        # Encode literal PowerShell arguments; paths containing spaces or apostrophes are safe.
-        $command = "& '" + $PSCommandPath.Replace("'", "''") + "' -Action '" + $Action + "' -StateDirectory '" + $root.Replace("'", "''") + "'"
-        if ($ToolPath) { $command += " -ToolPath '" + ([IO.Path]::GetFullPath($ToolPath)).Replace("'", "''") + "'" }
-        if ($GamePath) { $command += " -GamePath '" + ([IO.Path]::GetFullPath($GamePath)).Replace("'", "''") + "'" }
-        $command += '; if ($?) { exit 0 } else { exit 1 }'
+        $command = Get-Wd2HelperCommand $PSCommandPath $root
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
         $windowsDirectory = if ([Environment]::Is64BitProcess) { 'System32' } else { 'Sysnative' }
         $hostExe = Join-Path $env:SystemRoot "$windowsDirectory\WindowsPowerShell\v1.0\powershell.exe"
@@ -237,13 +332,17 @@ function Invoke-Wd2Fix {
         $child = Start-Process @launch
         $resultFile = Join-Path $root 'LastRun.log'
         if (Test-Path -LiteralPath $resultFile) { foreach ($line in Get-Content -LiteralPath $resultFile) { Write-Wd2Message $line } }
+        if ($child.ExitCode -eq 2) { throw [OperationCanceledException]::new('Cancelled before changing driver settings. No driver settings were changed.') }
         if ($child.ExitCode -ne 0) { throw "The Windows PowerShell helper failed (exit $($child.ExitCode)). Check $root for snapshots and logs." }
         return
     }
+    Write-Wd2Progress 5 'Checking Windows, administrator access, and required components.'
     $framework = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -ErrorAction SilentlyContinue
     if (-not $framework -or $framework.Release -lt 528040) { throw 'Install Microsoft .NET Framework 4.8, then run this script again.' }
+    Assert-Wd2NotCancelled
+    Write-Wd2Progress 10 'Finding Watch Dogs 2 in Steam, Epic, and Ubisoft install records.'
     try { $gameExe = Find-Wd2Game $GamePath; Write-Wd2Message "Found Watch Dogs 2: $gameExe" }
-    catch { if ($Action -eq 'Apply') { throw }; Write-Wd2Message 'Game install not found; the NVIDIA profile can still be checked or restored.' }
+    catch { if ($Action -eq 'Apply' -or $_.Exception -is [OperationCanceledException]) { throw }; Write-Wd2Message 'Game install not found; the NVIDIA profile can still be checked or restored.' }
     if (Get-Process -Name nvidiaProfileInspector, nvcplui -ErrorAction SilentlyContinue) { throw 'Close NVIDIA Profile Inspector and NVIDIA Control Panel before running this script.' }
     New-Item -ItemType Directory -Path $root -Force | Out-Null
     $lock = $null
@@ -252,6 +351,8 @@ function Invoke-Wd2Fix {
     try {
         $lock = [IO.File]::Open((Join-Path $root 'operation.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $exe = Get-Wd2Tool $root $ToolPath
+        Assert-Wd2NotCancelled
+        Write-Wd2Progress 40 'Opening the NVIDIA game-profile service.'
         Add-Type -AssemblyName PresentationFramework
         $assembly = [Reflection.Assembly]::LoadFrom($exe)
         $scopeType = $assembly.GetType('nvidiaProfileInspector.Common.DrsSessionScope', $true)
@@ -262,9 +363,12 @@ function Invoke-Wd2Fix {
         $exporter = $bootstrap.Resolve($assembly.GetType('nvidiaProfileInspector.Common.DrsImportService', $true))
         $settings = $bootstrap.Resolve($assembly.GetType('nvidiaProfileInspector.Common.DrsSettingsService', $true))
         $inspectionPath = Join-Path $root 'Status.latest.nip'
+        Assert-Wd2NotCancelled
+        Write-Wd2Progress 45 'Reading the current Watch Dogs 2 driver settings.'
         $currentProfile = Export-Wd2Profile $exporter $inspectionPath
         $current = @(Get-Wd2States $currentProfile)
         $statePath = Join-Path $root 'OriginalState.json'
+        Assert-Wd2NotCancelled
         if ($Action -eq 'Status') {
             foreach ($target in $script:Wd2Targets) {
                 $actual = @($current | Where-Object { $_.Id -eq $target.Id })[0]
@@ -275,6 +379,7 @@ function Invoke-Wd2Fix {
             Write-Wd2Message ('Undo backup available: ' + (Test-Path -LiteralPath $statePath))
             return
         }
+        Write-Wd2Progress 55 'Checking the original-settings backup.'
         $state = if (Test-Path -LiteralPath $statePath) { Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json } else { $null }
         if ($state) {
             Assert-Wd2OriginalState $state
@@ -288,6 +393,8 @@ function Invoke-Wd2Fix {
         $desired = if ($Action -eq 'Restore') { @($state.Original) } else { $script:Wd2Targets }
         if (Test-Wd2States $current $desired) { Write-Wd2Message 'The original flag values are already restored. No changes were needed.'; return }
         if (Get-Process -Name WatchDogs2, watchdogs2_rt64, watchdogs2_r64, watchdogs_rt64_dx12 -ErrorAction SilentlyContinue) { throw 'Close Watch Dogs 2 before applying or restoring the workaround. The script will not close it for you.' }
+        Assert-Wd2NotCancelled
+        Write-Wd2Progress 60 'Saving original game and customized-profile snapshots.'
         $runDirectory = Join-Path $root ('Backups\' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
         Copy-Item -LiteralPath $inspectionPath -Destination (Join-Path $runDirectory 'Game.before.nip')
@@ -296,12 +403,18 @@ function Invoke-Wd2Fix {
             $state = [pscustomobject]@{ Schema = 1; ProfileName = $script:Wd2ProfileName; ComputerName = $env:COMPUTERNAME; CreatedAt = (Get-Date).ToString('o'); Original = $current; OriginalSnapshot = (Join-Path $runDirectory 'Game.before.nip'); LastAction = 'BackedUp' }
             Save-Wd2State $state $statePath
         }
+        Write-Wd2Progress 65 'Original settings and rollback snapshots are saved.'
+        # Last cancellation checkpoint. After writes start, finish or roll back safely.
+        Assert-Wd2NotCancelled
         try {
+            Write-Wd2Progress 75 ('Writing the two game-profile settings for ' + $Action.ToLowerInvariant() + '.')
             Set-Wd2States $settings $current $desired
+            Write-Wd2Progress 85 'Reading back the saved settings and checking unrelated settings.'
             $afterProfile = Export-Wd2Profile $exporter (Join-Path $runDirectory 'Game.after.nip')
             if (-not (Test-Wd2States @(Get-Wd2States $afterProfile) $desired)) { throw 'Driver read-back did not match the requested flag values.' }
             if ((Get-Wd2UntouchedProfile $currentProfile) -ne (Get-Wd2UntouchedProfile $afterProfile)) { throw 'Another game-profile setting changed during this operation. Inspect the snapshots.' }
             $exporter.ExportAllCustomizedProfiles((Join-Path $runDirectory 'AllCustomized.after.nip'))
+            Write-Wd2Progress 95 'Saving verified results and backup metadata.'
             $state.LastAction = $Action
             Save-Wd2State $state $statePath
             "$Action verified at $((Get-Date).ToString('o'))" | Set-Content -LiteralPath (Join-Path $runDirectory 'Result.txt') -Encoding UTF8
@@ -310,6 +423,8 @@ function Invoke-Wd2Fix {
         } catch {
             $operationError = $_
             try {
+                try { Write-Wd2Progress $script:Wd2ProgressPercent 'The operation failed; restoring the pre-operation flag values.' }
+                catch { Write-Verbose 'Progress reporting failed; rollback still proceeds.' }
                 $failedProfile = Export-Wd2Profile $exporter (Join-Path $runDirectory 'Game.failed.nip')
                 Set-Wd2States $settings @(Get-Wd2States $failedProfile) $current
                 $rollbackProfile = Export-Wd2Profile $exporter (Join-Path $runDirectory 'Game.rollback.nip')
@@ -326,12 +441,40 @@ function Invoke-Wd2Fix {
     }
 }
 
-if ($MyInvocation.InvocationName -ne '.') {
+function Invoke-Wd2Script {
+    $ErrorActionPreference = 'Stop'
     $scriptExit = 0
-    try { Invoke-Wd2Fix } catch { Write-Wd2Message ('ERROR: ' + $_.Exception.Message); Write-Error $_ -ErrorAction Continue; $scriptExit = 1 }
+    $script:Wd2Messages.Clear()
+    try {
+        Set-Wd2ProgressDestination $ProgressFile
+        Write-Wd2Progress 0 'Checking requirements before starting.' -Reset
+        Set-Wd2CancellationDestination $CancellationFile
+        Assert-Wd2NotCancelled
+        Invoke-Wd2Fix | Out-Host
+        $message = switch ($Action) {
+            'Apply' { 'The shadow flicker workaround is applied and verified.' }
+            'Restore' { 'The original game-profile settings are restored and verified.' }
+            'Status' { 'The game-profile status has been checked.' }
+        }
+        Write-Wd2Progress 100 $message 'Succeeded'
+    } catch {
+        $failure = $_
+        $cancelled = $failure.Exception -is [OperationCanceledException]
+        $scriptExit = if ($cancelled) { 2 } else { 1 }
+        $terminalState = if ($cancelled) { 'Cancelled' } else { 'Failed' }
+        try { Write-Wd2Progress $script:Wd2ProgressPercent $failure.Exception.Message $terminalState }
+        catch { Write-Warning ('Could not save progress: ' + $_.Exception.Message) }
+        $prefix = if ($cancelled) { 'CANCELLED: ' } else { 'ERROR: ' }
+        Write-Wd2Message ($prefix + $failure.Exception.Message)
+        if (-not $cancelled) { Write-Error $failure -ErrorAction Continue }
+    }
     try {
         New-Item -ItemType Directory -Path $StateDirectory -Force -ErrorAction Stop | Out-Null
         $script:Wd2Messages | Set-Content -LiteralPath (Join-Path $StateDirectory 'LastRun.log') -Encoding UTF8 -ErrorAction Stop
     } catch { Write-Warning 'Could not save LastRun.log. The result is shown above.' }
-    exit $scriptExit
+    return $scriptExit
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    exit (Invoke-Wd2Script)
 }

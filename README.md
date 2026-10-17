@@ -1,6 +1,21 @@
 # Watch Dogs 2 Shadow Flicker Fix
 
-A standalone PowerShell script that applies a per-game NVIDIA driver-profile workaround for flickering shadows and sky in **Watch Dogs 2**.
+A Windows setup wizard and standalone PowerShell script that apply a per-game NVIDIA driver-profile workaround for flickering shadows and sky in **Watch Dogs 2**.
+
+## Windows installer
+
+[Download the Windows 10 / 11 installer ZIP (v1.1.0)](https://github.com/APouzi/WatchDogs2-Shadow-flicker-fix/releases/download/v1.1.0/Alexandres-WatchDogs2-Shadow-Flicker-v1.1.0-win-x64.zip)
+
+1. Close Watch Dogs 2 and extract the ZIP.
+2. Double-click `Alexandres-WatchDogs2-Shadow-Flicker-Setup.exe` and approve the Windows administrator prompt.
+3. Choose **Apply the shadow fix**, **Undo the fix**, or **Check current status**, then select **Continue**.
+4. Wait for the progress and verified result, then select **Finish**.
+
+The wizard uses the same backup and install detection as the script. Cancel stops at a safe checkpoint before driver changes begin; it is disabled while the values are saved and verified. The executable is unsigned, so Windows displays an unknown publisher. The ZIP includes checksum information and a short guide.
+
+![The installer welcome screen with the generated cloud logo](docs/installer-preview.png)
+
+See [installer details and build instructions](docs/installer.md). The original script remains available below.
 
 ## Requirements
 
@@ -55,9 +70,9 @@ For offline use, `-ToolPath` can point to an extracted official Profile Inspecto
 
 The workaround was confirmed by the user on an **RTX 3080 with NVIDIA driver 610.88**. Compatibility and effectiveness can vary by GPU and driver.
 
-Windows PowerShell 5.1 parsing, a read-only live status check, a fresh dependency download/checksum check, and PowerShell 7 helper compatibility passed locally. The 20 fixture checks cover flag parsing, idempotent writes, targeted restore, partial-write recovery helpers, malformed backup rejection, checksum rejection, and explicit installation paths. Launcher discovery also received independent mocked checks for Steam, Epic, and Ubisoft. Separate Windows 10 and Epic/Ubisoft gameplay were not tested.
+Windows PowerShell 5.1 parsing, a read-only live status check, a fresh dependency download/checksum check, and PowerShell 7 helper compatibility passed locally. The 20 fixture checks cover flag parsing, idempotent writes, targeted restore, partial-write recovery helpers, malformed backup rejection, checksum rejection, and explicit installation paths. Launcher discovery also received independent mocked checks for Steam, Epic, and Ubisoft. Local checks ran on Windows 10 Home 22H2; separate Windows 11 and Epic/Ubisoft gameplay were not tested.
 
-Run the fixture checks from the repository root; they use mocked settings and do not change NVIDIA profiles:
+Run the original fixture checks from the repository root; they use mocked settings and do not change NVIDIA profiles. The installer adds 32 progress/cancellation checks, 20 UI checks, and 35 package checks described in the build guide:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-WatchDogs2-FlickerFix.ps1
